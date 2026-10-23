@@ -14,10 +14,10 @@
  * message whenever one of them is behind.
  */
 
-import { MQTT_CONFIG } from './config.js';
+import { MQTT_CONFIG } from './config.js?v=5';
 import {
   SIZE, FLEET, generateCode, normalizeCode, shipCells, canPlace, randomFleet, shipAt, resolveShot
-} from './battleship-logic.js';
+} from './battleship-logic.js?v=5';
 
 const STORAGE_PREFIX = 'battleship:';
 const STORAGE_TTL_MS = 24 * 60 * 60 * 1000;

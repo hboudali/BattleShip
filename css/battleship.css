@@ -348,3 +348,5 @@ body {
   text-align: center;
 }
 .bs-toast.is-visible { opacity: 1; transform: translate(-50%, 0); }
+
+.bs-version { text-align: center; color: var(--muted); font-size: 0.75rem; margin: 0; }
