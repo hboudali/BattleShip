@@ -32,6 +32,7 @@ const $ = id => document.getElementById(id);
 let state = null;        // Persisted game state, null on the home screen
 let channel = null;
 let connected = false;
+let lastError = '';     // Shown to players so connection problems can be diagnosed
 let oppOnline = false;
 let heartbeat = null;
 let selectedShipId = null;
@@ -147,15 +148,18 @@ function connect() {
   heartbeat = setInterval(() => { if (needsSync()) sendSync(); }, HEARTBEAT_MS);
 
   return new Promise(resolve => {
-    channel.subscribe(async status => {
+    channel.subscribe(async (status, err) => {
       if (status === 'SUBSCRIBED') {
         connected = true;
+        lastError = '';
         // Runs again after every automatic reconnect, so presence is restored
         await channel.track({ role: state.role });
         sendSync();
         resolve(true);
       } else if (['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(status)) {
         connected = false;
+        lastError = err?.message ? `${status}: ${err.message}` : status;
+        console.error('Realtime connection problem:', status, err);
         resolve(false);
       }
       renderBanner();
@@ -436,7 +440,7 @@ async function joinGame(rawCode) {
   btn.textContent = 'Join';
 
   let problem = null;
-  if (!ok) problem = 'Could not connect. Check your internet and try again.';
+  if (!ok) problem = `Could not connect to the game server (${lastError}).`;
   else if (!host) problem = 'No game found with that code.';
   else if (others.some(o => o.role === 'guest')) problem = 'That game already has two players.';
 
@@ -608,7 +612,7 @@ function render() {
 function renderBanner() {
   const banner = $('connBanner');
   let text = '';
-  if (state && channel && !connected) text = 'Connection lost. Reconnecting…';
+  if (state && channel && !connected) text = `Connection lost. Reconnecting… (${lastError || 'connecting'})`;
   else if (state?.oppLeft) text = 'Your opponent left the game.';
   else if (state?.oppKey && !oppOnline && channel) text = 'Opponent is offline. Waiting for them to come back…';
   banner.textContent = text;
