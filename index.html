@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0f3d2e">
+  <title>Battleship</title>
+
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <!-- Battleship Styles -->
+  <link rel="stylesheet" href="css/battleship.css">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230f3d2e'/%3E%3Ccircle cx='32' cy='32' r='16' fill='none' stroke='%2334d399' stroke-width='5'/%3E%3Ccircle cx='32' cy='32' r='5' fill='%2334d399'/%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="bs-header">
+    <a class="bs-brand" href="./"><i class="fa-solid fa-anchor"></i> Battleship</a>
+    <span id="codeChip" class="bs-chip" hidden></span>
+  </header>
+
+  <main class="bs-main">
+    <!-- Connection banner -->
+    <div id="connBanner" class="bs-banner" hidden></div>
+
+    <!-- Home -->
+    <section id="screenHome" class="bs-screen">
+      <div class="bs-card">
+        <h1 class="bs-title">Sink the fleet</h1>
+        <p class="bs-muted">Two players, two phones. Create a game and share the code with your opponent.</p>
+        <button id="createBtn" class="bs-btn bs-btn-primary bs-btn-block">
+          <i class="fa-solid fa-plus"></i> Create game
+        </button>
+        <div class="bs-divider"><span>or join with a code</span></div>
+        <form id="joinForm" class="bs-join" autocomplete="off">
+          <input id="joinInput" class="bs-input" maxlength="8" placeholder="CODE" aria-label="Game code"
+                 autocapitalize="characters" spellcheck="false" inputmode="text">
+          <button class="bs-btn bs-btn-outline" type="submit">Join</button>
+        </form>
+        <p id="homeError" class="bs-error" role="alert"></p>
+      </div>
+      <details class="bs-card bs-rules">
+        <summary>How to play</summary>
+        <ul>
+          <li>Place your 5 ships on a 10×10 grid (lengths 5, 4, 3, 3, 2).</li>
+          <li>Take turns firing one shot at your opponent's grid.</li>
+          <li>When every cell of a ship is hit, it sinks.</li>
+          <li>The first to sink the whole enemy fleet wins.</li>
+        </ul>
+      </details>
+    </section>
+
+    <!-- Lobby -->
+    <section id="screenLobby" class="bs-screen" hidden>
+      <div class="bs-card bs-center">
+        <p class="bs-muted">Share this code with your opponent</p>
+        <div id="lobbyCode" class="bs-code"></div>
+        <button id="shareBtn" class="bs-btn bs-btn-outline"><i class="fa-solid fa-share-nodes"></i> Share code</button>
+        <p class="bs-waiting"><span class="bs-spinner"></span> Waiting for opponent to join…</p>
+        <button class="bs-btn bs-btn-ghost js-leave">Cancel</button>
+      </div>
+    </section>
+
+    <!-- Placement -->
+    <section id="screenPlace" class="bs-screen" hidden>
+      <p id="placeStatus" class="bs-status">Place your fleet</p>
+      <div id="placeBoard" class="bs-board" aria-label="Your board"></div>
+      <div id="dock" class="bs-dock"></div>
+      <div class="bs-toolbar">
+        <button id="rotateBtn" class="bs-btn bs-btn-outline"><i class="fa-solid fa-rotate"></i> <span id="rotateLabel">Horizontal</span></button>
+        <button id="randomBtn" class="bs-btn bs-btn-outline"><i class="fa-solid fa-shuffle"></i> Random</button>
+        <button id="clearBtn" class="bs-btn bs-btn-outline"><i class="fa-solid fa-eraser"></i> Clear</button>
+      </div>
+      <button id="readyBtn" class="bs-btn bs-btn-primary bs-btn-block" disabled>Ready</button>
+    </section>
+
+    <!-- Battle -->
+    <section id="screenBattle" class="bs-screen" hidden>
+      <p id="turnBanner" class="bs-turn"></p>
+      <div class="bs-board-label">Enemy waters <span id="enemyFleet" class="bs-fleet"></span></div>
+      <div id="enemyBoard" class="bs-board" aria-label="Enemy board"></div>
+      <div class="bs-board-label">Your fleet <span id="myFleet" class="bs-fleet"></span></div>
+      <div id="myBoard" class="bs-board bs-board-small" aria-label="Your board"></div>
+      <div id="overActions" class="bs-toolbar" hidden>
+        <button id="rematchBtn" class="bs-btn bs-btn-primary"><i class="fa-solid fa-rotate-right"></i> Rematch</button>
+        <button class="bs-btn bs-btn-outline js-leave">New game</button>
+      </div>
+      <button id="quitBtn" class="bs-btn bs-btn-ghost js-leave">Leave game</button>
+    </section>
+
+    <div id="toast" class="bs-toast" role="status" aria-live="polite"></div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script type="module" src="js/battleship.js"></script>
+</body>
+</html>
