@@ -1,9 +1,9 @@
 /**
  * Battleship – online two-player game
  *
- * Players connect through a Supabase Realtime channel named after the game
- * code. No database table is used: presence tells each side who is online and
- * broadcast messages carry shots and results.
+ * Players connect through a public MQTT broker on a topic named after the
+ * game code. Heartbeat messages tell each side who is online, and game
+ * messages carry shots and results. No accounts or database are needed.
  *
  * Each device only knows its own fleet. The attacker sends a shot, the
  * defender resolves it and replies with the result, so ship positions are
@@ -14,23 +14,25 @@
  * message whenever one of them is behind.
  */
 
-import { SUPABASE_CONFIG } from './config.js';
+import { MQTT_CONFIG } from './config.js';
 import {
   SIZE, FLEET, generateCode, normalizeCode, shipCells, canPlace, randomFleet, shipAt, resolveShot
 } from './battleship-logic.js';
-
-const supabase = window.supabase.createClient(SUPABASE_CONFIG.URL, SUPABASE_CONFIG.ANON_KEY);
 
 const STORAGE_PREFIX = 'battleship:';
 const STORAGE_TTL_MS = 24 * 60 * 60 * 1000;
 const JOIN_TIMEOUT_MS = 5000;
 const HEARTBEAT_MS = 4000;
+const PRESENCE_TTL_MS = 12000;
+const CONNECT_TIMEOUT_MS = 8000;
 const COLUMNS = 'ABCDEFGHIJ';
 
 const $ = id => document.getElementById(id);
 
 let state = null;        // Persisted game state, null on the home screen
-let channel = null;
+let client = null;       // MQTT client
+const peers = new Map(); // clientId -> { role, seen }
+let lastPeerKeys = '';
 let connected = false;
 let lastError = '';     // Shown to players so connection problems can be diagnosed
 let oppOnline = false;
@@ -130,51 +132,114 @@ function winner() {
 
 /* ---------- Networking ---------- */
 
+const topic = () => `${MQTT_CONFIG.TOPIC_PREFIX}/${state.code}`;
+
 function presenceOthers() {
-  if (!channel) return [];
-  return Object.entries(channel.presenceState())
-    .filter(([key]) => key !== state?.clientId)
-    .map(([key, metas]) => ({ key, ...metas[0] }));
+  const now = Date.now();
+  return [...peers]
+    .filter(([key, peer]) => key !== state?.clientId && now - peer.seen < PRESENCE_TTL_MS)
+    .map(([key, peer]) => ({ key, role: peer.role }));
+}
+
+function publish(payload) {
+  if (!client?.connected) return Promise.resolve();
+  return new Promise(resolve => client.publish(topic(), JSON.stringify(payload), { qos: 1 }, () => resolve()));
+}
+
+// "who" asks everyone in the game to announce themselves; "here" is the answer and the heartbeat
+function announce(type = 'here') {
+  publish({ type, from: state.clientId, role: state.role });
+}
+
+function onRawMessage(_topic, buffer) {
+  let msg;
+  try { msg = JSON.parse(buffer.toString()); } catch { return; }
+  if (!state || !msg || msg.from === state.clientId) return;
+
+  if (msg.type === 'here' || msg.type === 'who') {
+    const isNew = !presenceOthers().some(o => o.key === msg.from);
+    peers.set(msg.from, { role: msg.role, seen: Date.now() });
+    if (msg.type === 'who') announce();
+    if (isNew) onPresenceSync();
+    return;
+  }
+  if (msg.type === 'gone') {
+    peers.delete(msg.from);
+    onPresenceSync();
+    return;
+  }
+  if (peers.has(msg.from)) peers.get(msg.from).seen = Date.now();
+  handleMessage(msg);
+}
+
+function onHeartbeat() {
+  announce();
+  // Notice when the opponent's heartbeats stop (phone locked, tab closed)
+  const keys = presenceOthers().map(o => o.key).join();
+  if (keys !== lastPeerKeys) onPresenceSync();
+  if (needsSync()) sendSync();
 }
 
 function connect() {
-  channel = supabase.channel(`battleship:${state.code}`, {
-    config: { broadcast: { self: false }, presence: { key: state.clientId } }
+  peers.clear();
+  lastPeerKeys = '';
+  let settle;
+  const settled = new Promise(resolve => { settle = resolve; });
+
+  client = window.mqtt.connect(MQTT_CONFIG.URL, {
+    // Random suffix so two tabs on one game don't kick each other off the broker
+    clientId: `bs_${state.clientId.replace(/-/g, '').slice(0, 12)}_${generateCode(4)}`,
+    clean: true,
+    keepalive: 30,
+    reconnectPeriod: 2000,
+    connectTimeout: CONNECT_TIMEOUT_MS,
+    will: { topic: topic(), payload: JSON.stringify({ type: 'gone', from: state.clientId }), qos: 0, retain: false }
   });
-  channel.on('broadcast', { event: 'msg' }, ({ payload }) => handleMessage(payload));
-  channel.on('presence', { event: 'sync' }, onPresenceSync);
-
-  clearInterval(heartbeat);
-  heartbeat = setInterval(() => { if (needsSync()) sendSync(); }, HEARTBEAT_MS);
-
-  return new Promise(resolve => {
-    channel.subscribe(async (status, err) => {
-      if (status === 'SUBSCRIBED') {
-        connected = true;
-        lastError = '';
-        // Runs again after every automatic reconnect, so presence is restored
-        await channel.track({ role: state.role });
-        sendSync();
-        resolve(true);
-      } else if (['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(status)) {
-        connected = false;
-        lastError = err?.message ? `${status}: ${err.message}` : status;
-        console.error('Realtime connection problem:', status, err);
-        resolve(false);
+  client.on('message', onRawMessage);
+  // Fires again after every automatic reconnect, so the subscription is restored
+  client.on('connect', () => {
+    client.subscribe(topic(), { qos: 1 }, err => {
+      if (err) {
+        lastError = err.message;
+        return;
       }
+      connected = true;
+      lastError = '';
+      announce('who');
+      sendSync();
+      settle(true);
       renderBanner();
     });
   });
+  client.on('error', err => {
+    lastError = err.message;
+    console.error('Connection problem:', err);
+  });
+  ['close', 'offline'].forEach(event => client.on(event, () => {
+    connected = false;
+    renderBanner();
+  }));
+
+  clearInterval(heartbeat);
+  heartbeat = setInterval(onHeartbeat, HEARTBEAT_MS);
+
+  setTimeout(() => {
+    if (!lastError) lastError = 'timed out';
+    settle(false);
+  }, CONNECT_TIMEOUT_MS + 2000);
+  return settled;
 }
 
 async function disconnect() {
   clearInterval(heartbeat);
   heartbeat = null;
-  if (channel) {
-    const old = channel;
-    channel = null;
-    await supabase.removeChannel(old);
+  if (client) {
+    const old = client;
+    if (old.connected) await publish({ type: 'gone', from: state.clientId });
+    client = null;
+    await new Promise(resolve => old.end(false, {}, resolve));
   }
+  peers.clear();
   connected = false;
   oppOnline = false;
 }
@@ -192,12 +257,8 @@ function waitForPresence(predicate, timeoutMs) {
 }
 
 function send(type, data = {}) {
-  if (!channel || !state?.oppKey) return Promise.resolve();
-  return channel.send({
-    type: 'broadcast',
-    event: 'msg',
-    payload: { type, from: state.clientId, to: state.oppKey, round: state.round, ...data }
-  });
+  if (!state?.oppKey) return Promise.resolve();
+  return publish({ type, from: state.clientId, to: state.oppKey, round: state.round, ...data });
 }
 
 function sendSync() {
@@ -226,6 +287,7 @@ function needsSync() {
 function onPresenceSync() {
   if (!state) return;
   const others = presenceOthers();
+  lastPeerKeys = others.map(o => o.key).join();
 
   if (!state.oppKey && state.role === 'host') {
     const guest = others.find(o => o.role === 'guest');
@@ -612,9 +674,9 @@ function render() {
 function renderBanner() {
   const banner = $('connBanner');
   let text = '';
-  if (state && channel && !connected) text = `Connection lost. Reconnecting… (${lastError || 'connecting'})`;
+  if (state && client && !connected) text = `Connection lost. Reconnecting… (${lastError || 'connecting'})`;
   else if (state?.oppLeft) text = 'Your opponent left the game.';
-  else if (state?.oppKey && !oppOnline && channel) text = 'Opponent is offline. Waiting for them to come back…';
+  else if (state?.oppKey && !oppOnline && client) text = 'Opponent is offline. Waiting for them to come back…';
   banner.textContent = text;
   banner.hidden = !text;
 }
@@ -817,7 +879,10 @@ function init() {
 
   // Phones drop sockets when locked; catch up as soon as we're visible again
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && state) sendSync();
+    if (document.visibilityState === 'visible' && state && client) {
+      announce();
+      sendSync();
+    }
   });
 
   const code = normalizeCode(new URLSearchParams(window.location.search).get('game'));

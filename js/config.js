@@ -1,10 +1,12 @@
 /**
- * Supabase Configuration
+ * Connection Configuration
  *
- * Only Realtime (presence + broadcast) is used; no tables are read or written.
- * The anon key is designed to be public.
+ * Players meet on a free public MQTT broker over secure WebSockets, so no
+ * account or server is needed. Both players must use the same broker and
+ * topic prefix. Alternatives: wss://broker.emqx.io:8084/mqtt or
+ * wss://test.mosquitto.org:8081.
  */
-export const SUPABASE_CONFIG = {
-  URL: 'https://xfnvufaarfiwfigshdij.supabase.co',
-  ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhmbnZ1ZmFhcmZpd2ZpZ3NoZGlqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTAyNDc0NTMsImV4cCI6MjA2NTgyMzQ1M30.OdIPGAnvNZs3AW2Uh2-UuubIyuu3KkV8cbcmDgzuQXs'
+export const MQTT_CONFIG = {
+  URL: 'wss://broker.hivemq.com:8884/mqtt',
+  TOPIC_PREFIX: 'hboudali-battleship/v1'
 };
