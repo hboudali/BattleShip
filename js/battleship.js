@@ -1,7 +1,7 @@
 /**
  * Battleship – online two-player game
  *
- * Players connect through a public MQTT broker on a topic named after the
+ * Players connect through public MQTT brokers on a topic named after the
  * game code. Heartbeat messages tell each side who is online, and game
  * messages carry shots and results. No accounts or database are needed.
  *
@@ -21,17 +21,18 @@ import {
 
 const STORAGE_PREFIX = 'battleship:';
 const STORAGE_TTL_MS = 24 * 60 * 60 * 1000;
-const JOIN_TIMEOUT_MS = 5000;
+const JOIN_TIMEOUT_MS = 8000;
 const HEARTBEAT_MS = 4000;
 const PRESENCE_TTL_MS = 12000;
-const CONNECT_TIMEOUT_MS = 8000;
+const CONNECT_TIMEOUT_MS = 15000;
 const COLUMNS = 'ABCDEFGHIJ';
 
 const $ = id => document.getElementById(id);
 
 let state = null;        // Persisted game state, null on the home screen
-let client = null;       // MQTT client
+let brokers = [];        // One MQTT connection per configured broker
 const peers = new Map(); // clientId -> { role, seen }
+const seenIds = new Set();
 let lastPeerKeys = '';
 let connected = false;
 let lastError = '';     // Shown to players so connection problems can be diagnosed
@@ -142,8 +143,9 @@ function presenceOthers() {
 }
 
 function publish(payload) {
-  if (!client?.connected) return Promise.resolve();
-  return new Promise(resolve => client.publish(topic(), JSON.stringify(payload), { qos: 1 }, () => resolve()));
+  const message = JSON.stringify({ ...payload, id: generateCode(10) });
+  const live = brokers.filter(b => b.client.connected);
+  return Promise.all(live.map(b => new Promise(resolve => b.client.publish(topic(), message, { qos: 1 }, () => resolve()))));
 }
 
 // "who" asks everyone in the game to announce themselves; "here" is the answer and the heartbeat
@@ -155,6 +157,13 @@ function onRawMessage(_topic, buffer) {
   let msg;
   try { msg = JSON.parse(buffer.toString()); } catch { return; }
   if (!state || !msg || msg.from === state.clientId) return;
+
+  // The same message arrives once per shared broker
+  if (msg.id) {
+    if (seenIds.has(msg.id)) return;
+    seenIds.add(msg.id);
+    if (seenIds.size > 1000) seenIds.delete(seenIds.values().next().value);
+  }
 
   if (msg.type === 'here' || msg.type === 'who') {
     const isNew = !presenceOthers().some(o => o.key === msg.from);
@@ -180,64 +189,77 @@ function onHeartbeat() {
   if (needsSync()) sendSync();
 }
 
+function updateConnection() {
+  connected = brokers.some(b => b.ready && b.client.connected);
+  lastError = brokers.map(b => `${b.name}: ${b.ready && b.client.connected ? 'ok' : b.error || 'connecting'}`).join(', ');
+  renderBanner();
+}
+
+/**
+ * Connect to every broker in the config at once and send each message through
+ * all of them. Some networks block a broker's port, so the two phones only
+ * need one broker in common.
+ */
 function connect() {
   peers.clear();
   lastPeerKeys = '';
   let settle;
   const settled = new Promise(resolve => { settle = resolve; });
+  // Random suffix so two tabs on one game don't kick each other off a broker
+  const clientId = `bs_${state.clientId.replace(/-/g, '').slice(0, 12)}_${generateCode(4)}`;
+  const will = { topic: topic(), payload: JSON.stringify({ type: 'gone', from: state.clientId }), qos: 0, retain: false };
 
-  client = window.mqtt.connect(MQTT_CONFIG.URL, {
-    // Random suffix so two tabs on one game don't kick each other off the broker
-    clientId: `bs_${state.clientId.replace(/-/g, '').slice(0, 12)}_${generateCode(4)}`,
-    clean: true,
-    keepalive: 30,
-    reconnectPeriod: 2000,
-    connectTimeout: CONNECT_TIMEOUT_MS,
-    will: { topic: topic(), payload: JSON.stringify({ type: 'gone', from: state.clientId }), qos: 0, retain: false }
-  });
-  client.on('message', onRawMessage);
-  // Fires again after every automatic reconnect, so the subscription is restored
-  client.on('connect', () => {
-    client.subscribe(topic(), { qos: 1 }, err => {
-      if (err) {
-        lastError = err.message;
-        return;
-      }
-      connected = true;
-      lastError = '';
-      announce('who');
-      sendSync();
-      settle(true);
-      renderBanner();
+  brokers = MQTT_CONFIG.BROKERS.map(url => {
+    const broker = { url, name: new URL(url).hostname.split('.').slice(-2, -1)[0], ready: false, error: '' };
+    broker.client = window.mqtt.connect(url, {
+      clientId,
+      clean: true,
+      keepalive: 30,
+      reconnectPeriod: 3000,
+      connectTimeout: CONNECT_TIMEOUT_MS,
+      will
     });
+    broker.client.on('message', onRawMessage);
+    // Fires again after every automatic reconnect, so the subscription is restored
+    broker.client.on('connect', () => {
+      broker.client.subscribe(topic(), { qos: 1 }, err => {
+        broker.ready = !err;
+        broker.error = err ? err.message : '';
+        updateConnection();
+        if (err) return;
+        announce('who');
+        sendSync();
+        settle(true);
+      });
+    });
+    broker.client.on('error', err => {
+      broker.error = err.message;
+      console.error(`Connection problem (${url}):`, err);
+      updateConnection();
+    });
+    ['close', 'offline'].forEach(event => broker.client.on(event, () => {
+      broker.ready = false;
+      updateConnection();
+    }));
+    return broker;
   });
-  client.on('error', err => {
-    lastError = err.message;
-    console.error('Connection problem:', err);
-  });
-  ['close', 'offline'].forEach(event => client.on(event, () => {
-    connected = false;
-    renderBanner();
-  }));
+  updateConnection();
 
   clearInterval(heartbeat);
   heartbeat = setInterval(onHeartbeat, HEARTBEAT_MS);
 
-  setTimeout(() => {
-    if (!lastError) lastError = 'timed out';
-    settle(false);
-  }, CONNECT_TIMEOUT_MS + 2000);
+  setTimeout(() => settle(connected), CONNECT_TIMEOUT_MS + 2000);
   return settled;
 }
 
 async function disconnect() {
   clearInterval(heartbeat);
   heartbeat = null;
-  if (client) {
-    const old = client;
-    if (old.connected) await publish({ type: 'gone', from: state.clientId });
-    client = null;
-    await new Promise(resolve => old.end(false, {}, resolve));
+  if (brokers.length) {
+    await publish({ type: 'gone', from: state.clientId });
+    const old = brokers;
+    brokers = [];
+    await Promise.all(old.map(b => new Promise(resolve => b.client.end(false, {}, resolve))));
   }
   peers.clear();
   connected = false;
@@ -674,9 +696,9 @@ function render() {
 function renderBanner() {
   const banner = $('connBanner');
   let text = '';
-  if (state && client && !connected) text = `Connection lost. Reconnecting… (${lastError || 'connecting'})`;
+  if (state && brokers.length && !connected) text = `Connection lost. Reconnecting… (${lastError || 'connecting'})`;
   else if (state?.oppLeft) text = 'Your opponent left the game.';
-  else if (state?.oppKey && !oppOnline && client) text = 'Opponent is offline. Waiting for them to come back…';
+  else if (state?.oppKey && !oppOnline && brokers.length) text = 'Opponent is offline. Waiting for them to come back…';
   banner.textContent = text;
   banner.hidden = !text;
 }
@@ -879,7 +901,7 @@ function init() {
 
   // Phones drop sockets when locked; catch up as soon as we're visible again
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && state && client) {
+    if (document.visibilityState === 'visible' && state && brokers.length) {
       announce();
       sendSync();
     }
